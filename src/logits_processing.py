@@ -6,15 +6,13 @@ from jax import Array
 import jax.nn as nn
 import jax.numpy as jnp
 import jax.random as rand
+from itertools import repeat
 
-from ..rand_utils import split_key_nullable
 
-# TODO: need type checking?
-# _, seq_len = seq.shape
-# assert seq.shape == (batch_size, seq_len)
-# assert seq.dtype == jnp.uint16
-# assert attn_mask.shape == (batch_size, seq_len)
-# assert attn_mask.dtype == jnp.bool_
+def split_key_nullable(key: Array | None, num: int=2):
+    if key is None:
+        return tuple(repeat(None, num))
+    return rand.split(key, num)
 
 def PresencePenaltyProcessor(penalty: float) -> Callable:
     def inner(logits: Array, *, seq: Array, attn_mask: Array, **kwargs) -> Array:
