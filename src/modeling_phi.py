@@ -273,7 +273,7 @@ def forward_attention(params: Attention, src_seq: Array, dst_seq: Array, qk_mask
     q_shape = q.shape
     if attn_impl == 'normal':
         qk = op.einsum(q, k, 'B R H S K, B H D K -> B R H S D')
-        qk /= math.sqrt(model_config.d_k)
+        qk /= math.sqrt(model_config.head_dim)
         qk = jnp.where(qk_mask, qk, -jnp.inf)
         qk = nn.softmax(qk)  # TODO: use `where`
         qk = jnp.where(qk_mask, qk, 0)  # TODO: why this line?
@@ -302,9 +302,9 @@ def forward_attention(params: Attention, src_seq: Array, dst_seq: Array, qk_mask
                        P(*name_tuple_k))
         
         if attn_impl == 'flash':
-            qkv = shard_map(partial(flash_attention, sm_scale=math.sqrt(model_config.d_k), debug=False, causal=False, block_sizes=block_sizes), mesh=mesh_k, in_specs=specs_tuple, out_specs=P(*name_tuple_k), check_rep=False)(q, k, v, attention_bias)
+            qkv = shard_map(partial(flash_attention, sm_scale=math.sqrt(model_config.head_dim), debug=False, causal=False, block_sizes=block_sizes), mesh=mesh_k, in_specs=specs_tuple, out_specs=P(*name_tuple_k), check_rep=False)(q, k, v, attention_bias)
         if attn_impl == 'ring':
-            qkv = shard_map(partial(ring_attention, sm_scale=math.sqrt(model_config.d_k), debug=False, causal=True), mesh=mesh_k, in_specs=specs_tuple, out_specs=P(*name_tuple_k), check_rep=False)(q, k, v, attention_bias)
+            qkv = shard_map(partial(ring_attention, sm_scale=math.sqrt(model_config.head_dim), debug=False, causal=True), mesh=mesh_k, in_specs=specs_tuple, out_specs=P(*name_tuple_k), check_rep=False)(q, k, v, attention_bias)
             
         qkv = qkv.astype(jnp.bfloat16)
     
