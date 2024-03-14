@@ -5,7 +5,7 @@ import numpy as np
 from jax.experimental import mesh_utils
 import gc
 import jax
-from .modeling_phi import Phi, PhiModel, Attention, DecoderBlock, Layernorm, Proj
+from .modeling_phi import Phi, PhiModel, Attention, DecoderBlock, LayerNorm, Proj
 
 def shard_array(arr: Array, axes: tuple | EllipsisType) -> Array:
     num_axes = 1 if isinstance(axes, EllipsisType) else len(axes)
