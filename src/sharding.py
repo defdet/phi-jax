@@ -5,7 +5,7 @@ import numpy as np
 from jax.experimental import mesh_utils
 import gc
 import jax
-from .modeling_phi import Phi, PhiModel, Attention, DecoderBlock
+from .modeling_phi import Phi, PhiModel, Attention, DecoderBlock, Layernorm, Proj
 
 def shard_array(arr: Array, axes: tuple | EllipsisType) -> Array:
     num_axes = 1 if isinstance(axes, EllipsisType) else len(axes)
@@ -43,16 +43,15 @@ sharding_mp = Phi(
     model=PhiModel(
         embedding=...,
         decoder=DecoderBlock(
-            input_norm=...,
-            attention=Attention(q_proj=(1, 3), k_proj=(1, 2), v_proj=(1, 2), out_proj=(2, 4)),
-            post_attn_norm=...,
-            gate_proj=(1, 2),
-            up_proj=(1, 2),
-            down_proj=(2, 1),
+            input_layernorm=Layernorm(weight=..., bias=...),
+            attention=Attention(q_proj=Proj(weight=(1, 3), bias=...), k_proj==Proj(weight=(1, 2), bias=...), v_proj==Proj(weight=(1, 2), bias=...), dense==Proj(weight=(2, 4), bias=...),
+            gate_proj=Proj(weight=(1, 2), bias=...),
+            up_proj=Proj(weight=(1, 2), bias=...),
+            down_proj==Proj(weight=(2, 1), bias=...)
         ),
-        norm=...,
+        final_layernorm=Layernorm(weight=..., bias=...)
     ),
-    lm_head=...,
+    lm_head=Proj(weight=..., bias=...),
 )
 
 def shard_model_params(params: Phi) -> Phi:
