@@ -358,11 +358,11 @@ def forward_decoder_block(params: DecoderBlock, seq: Array, qk_mask: Array, *, r
     attn_seq = forward_dropout(attn_seq, key=key0, model_config=model_config)
 
 
-    seq = params.fc1.weight @ seq + params.fc1.bias.reshape(1, 1, -1)
+    seq = seq @ params.fc1.weight + params.fc1.bias.reshape(1, 1, -1)
     seq = jax.lax.with_sharding_constraint(seq, sharding_ff)
 
     seq = jax.nn.silu(seq)
-    seq = params.fc2.weight @ seq + params.fc2.bias.reshape(1, 1, -1)
+    seq = seq @ params.fc2.weight + params.fc2.bias.reshape(1, 1, -1)
     seq = jax.lax.with_sharding_constraint(seq, sharding_seq)
     seq = forward_dropout(seq, key=key0, model_config=model_config)
     
