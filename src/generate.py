@@ -9,7 +9,7 @@ import jax.random as rand
 from transformers import LlamaTokenizer
 from typing import Callable
 
-from modeling_phi import KVCache, Phi, RotaryValues, forward_phi_model, get_rotary_values_at_position, make_rotary_values, phi_config, shift_left_kv_cache
+from .modeling_phi import KVCache, Phi, RotaryValues, forward_phi_model, get_rotary_values_at_position, make_rotary_values, phi_config, shift_left_kv_cache
 
 @partial(jax.jit, static_argnames=('logits_processor',))
 def _generate_first(params: Phi, seq: Array, attn_mask: Array, logits_processor: Callable, *, rotary_values: RotaryValues, key: Array) -> tuple[Array, Array, Array, KVCache]:
