@@ -398,6 +398,6 @@ def forward_phi_model(params: PhiModel, seq: Array, qk_mask: Array, *, rotary_va
 @partial(jax.jit, static_argnames=('model_config'))
 def forward_phi(params: Phi, seq: Array, qk_mask: Array, *, rotary_values: RotaryValues, kv_cache: KVCache | None=None, key: Array | None=None, model_config: ModelConfig) -> tuple[Array, KVCache | None]:
     outputs, kv_cache = forward_phi_model(params.model, seq, qk_mask, rotary_values=rotary_values, kv_cache=kv_cache, key=key, model_config=model_config)
-    logits = outputs @ params.lm_head.weight
+    logits = outputs @ params.lm_head.weight.T
     logits += params.lm_head.bias.reshape(1, 1, -1)
     return logits, kv_cache
