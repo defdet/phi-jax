@@ -44,7 +44,7 @@ sharding_mp = Phi(
         embedding=...,
         decoder=DecoderBlock(
             input_layernorm=Layernorm(weight=..., bias=...),
-            attention=Attention(q_proj=Proj(weight=(1, 3), bias=...), k_proj==Proj(weight=(1, 2), bias=...), v_proj==Proj(weight=(1, 2), bias=...), dense==Proj(weight=(2, 4), bias=...),
+            attention=Attention(q_proj=Proj(weight=(1, 3), bias=...), k_proj==Proj(weight=(1, 2), bias=...), v_proj==Proj(weight=(1, 2), bias=...), dense==Proj(weight=(2, 4), bias=...)),
             gate_proj=Proj(weight=(1, 2), bias=...),
             up_proj=Proj(weight=(1, 2), bias=...),
             down_proj==Proj(weight=(2, 1), bias=...),
