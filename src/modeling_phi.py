@@ -54,7 +54,7 @@ class ModelConfig(NamedTuple):
     n_layers: int
     n_rep_kv: int
     partial_rotary_factor: float
-    rms_norm_eps: float
+    layer_norm_epsilon: float
     vocab_size: int
 
     # TODO: move out of model config
@@ -137,7 +137,8 @@ def forward_rotary_embedding(m: Array, *, rotary_values: RotaryValues) -> Array:
     return a + b
 
 def make_rotary_values(leftpad_len: Array | None, batch_size: int, seq_len: int, *, model_config: ModelConfig) -> RotaryValues:
-    sin_val, cos_val = _make_weights(seq_len, model_config.d_k)
+    rotary_dim = int(model_config.partial_rotary_factor * model_config.head_dim)
+    sin_val, cos_val = _make_weights(seq_len, rotary_dim)
 
     sin_val = jnp.repeat(sin_val[None], batch_size, axis=0)
     cos_val = jnp.repeat(cos_val[None], batch_size, axis=0)
@@ -232,8 +233,23 @@ def forward_attention(params: Attention, src_seq: Array, dst_seq: Array, qk_mask
     k = jax.lax.with_sharding_constraint(k, sharding_k)
     v = jax.lax.with_sharding_constraint(v, sharding_v)
 
-    q = forward_rotary_embedding(q, rotary_values=rotary_values)
-    k = forward_rotary_embedding(k, rotary_values=rotary_values)
+    rotary_dim = int(model_config.partial_rotary_factor * model_config.head_dim)
+
+    q_rot, q_pass = (
+        q[..., :rotary_dim],
+        q[..., rotary_dim:],
+    )
+    k_rot, k_pass = (
+        k[..., :rotary_dim],
+        k[..., rotary_dim:],
+    )
+
+    # [batch_size, seq_length, num_heads, head_dim * config.partial_rotary_factor]
+    q_rot = forward_rotary_embedding(q_rot, rotary_values=rotary_values)
+    k_rot = forward_rotary_embedding(k_rot, rotary_values=rotary_values)
+
+    q = jnp.concatenate((q_rot, q_pass), dim=-1)
+    k = jnp.concatenate((k_rot, k_pass), dim=-1)
 
     if n_devices == 32:
         q = q.astype(jnp.float32)
@@ -278,7 +294,7 @@ def forward_attention(params: Attention, src_seq: Array, dst_seq: Array, qk_mask
     qkv = qkv.astype(jnp.bfloat16)
 
     qkv = qkv.reshape(qkv.shape[0], model_config.n_rep_kv, qkv.shape[1] // model_config.n_rep_kv, qkv.shape[2], -1)
-    out = op.einsum(qkv, params.out_proj, 'B R H S V, R H V M -> B S M')
+    out = op.einsum(qkv, params.dense, 'B R H S V, R H V M -> B S M')
     out = jax.lax.with_sharding_constraint(out, sharding_out)
     
     kv_cache = None if not model_config.return_kv_cache else KVCache(k, v)
