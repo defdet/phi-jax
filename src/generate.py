@@ -17,7 +17,6 @@ def _generate_first(params: Phi, seq: Array, attn_mask: Array, logits_processor:
     outputs, kv_cache = forward_phi_model(params.model, seq, qk_mask, rotary_values=rotary_values, model_config=phi_config._replace(return_kv_cache=True))
 
     logits = outputs[:, -1] @ params.lm_head.weight.T
-    print(logits.shape, 'logits_shape')
     logits += params.lm_head.bias.reshape(1, -1)
 
     selected_token_ids = logits_processor(logits, seq=seq, attn_mask=attn_mask, key=key)
