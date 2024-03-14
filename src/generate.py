@@ -16,7 +16,9 @@ def _generate_first(params: Phi, seq: Array, attn_mask: Array, logits_processor:
     qk_mask = op.rearrange(jnp.tril(op.einsum(attn_mask, attn_mask, 'B L1, B L2 -> B L1 L2')), 'B L1 L2 -> B 1 1 L1 L2')  # causal QK mask
     outputs, kv_cache = forward_phi_model(params.model, seq, qk_mask, rotary_values=rotary_values, model_config=phi_config._replace(return_kv_cache=True))
 
-    logits = outputs[:, -1] @ params.lm_head
+    logits = outputs[:, -1] @ params.lm_head.weight
+    logits += params.lm_head.bias.reshape(1, logits.shape[1], 1, logits.shape[3])
+
     selected_token_ids = logits_processor(logits, seq=seq, attn_mask=attn_mask, key=key)
 
     seq = jnp.roll(seq, -1, axis=-1).at[:, -1].set(selected_token_ids)
@@ -48,7 +50,8 @@ def _generate_rest(params: Phi, seq: Array, attn_mask: Array, selected_token_ids
         rotary_values_ = get_rotary_values_at_position(rotary_values, rotary_values_position)
         outputs, kv_cache = forward_phi_model(params.model, seq_, qk_mask, rotary_values=rotary_values_, kv_cache=kv_cache, model_config=phi_config._replace(return_kv_cache=True))
 
-        logits = outputs[:, -1] @ params.lm_head
+        logits = outputs[:, -1] @ params.lm_head.weight
+        logits += params.lm_head.bias.reshape(1, logits.shape[1], 1, logits.shape[3])
         key, subkey = rand.split(key)
         selected_token_ids = logits_processor(logits, seq=seq, attn_mask=attn_mask, key=subkey)
 
