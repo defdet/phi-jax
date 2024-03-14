@@ -358,11 +358,11 @@ def forward_decoder_block(params: DecoderBlock, seq: Array, qk_mask: Array, *, r
     attn_seq = forward_dropout(attn_seq, key=key0, model_config=model_config)
 
 
-    seq = params.fc1.weight @ seq + params.fc1.bias
+    seq = params.fc1.weight @ seq + params.fc1.bias.reshape(1, 1, -1)
     seq = jax.lax.with_sharding_constraint(seq, sharding_ff)
 
     seq = jax.nn.silu(seq)
-    seq = params.fc2.weight @ seq + params.fc2.bias
+    seq = params.fc2.weight @ seq + params.fc2.bias.reshape(1, 1, -1)
     seq = jax.lax.with_sharding_constraint(seq, sharding_seq)
     seq = forward_dropout(seq, key=key0, model_config=model_config)
     
@@ -399,5 +399,5 @@ def forward_phi_model(params: PhiModel, seq: Array, qk_mask: Array, *, rotary_va
 def forward_phi(params: Phi, seq: Array, qk_mask: Array, *, rotary_values: RotaryValues, kv_cache: KVCache | None=None, key: Array | None=None, model_config: ModelConfig) -> tuple[Array, KVCache | None]:
     outputs, kv_cache = forward_phi_model(params.model, seq, qk_mask, rotary_values=rotary_values, kv_cache=kv_cache, key=key, model_config=model_config)
     logits = outputs @ params.lm_head.weight
-    logits += params.lm_head.bias.reshape(1, logits.shape[1], 1, logits.shape[3])
+    logits += params.lm_head.bias.reshape(1, 1, -1)
     return logits, kv_cache
