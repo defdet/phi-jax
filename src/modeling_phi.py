@@ -221,13 +221,14 @@ def forward_attention(params: Attention, src_seq: Array, dst_seq: Array, qk_mask
     mesh_out = Mesh(devices.reshape(sharding_tuple_out), name_tuple_out)     
     sharding_out = NamedSharding(mesh_out, P(*name_tuple_out))
 
-    q_proj = params.q_proj
-    k_proj = params.k_proj
-    v_proj = params.v_proj
-
-    q = op.einsum(src_seq, q_proj, 'B S M, M R H K -> B R H S K')
-    k = op.einsum(dst_seq, k_proj, 'B D M, M H K -> B H D K')
-    v = op.einsum(dst_seq, v_proj, 'B D M, M H V -> B H D V')
+    q = op.einsum(src_seq, params.q_proj.weight, 'B S M, M R H K -> B R H S K')
+    q += params.q_proj.bias.reshape(1, 1, q.shape[2], 1, q.shape[4])
+    
+    k = op.einsum(dst_seq, params.k_proj.weight, 'B D M, M H K -> B H D K')
+    k += params.k_proj.bias.reshape(1, k.shape[1], 1, k.shape[3])
+    
+    v = op.einsum(dst_seq, params.v_proj.weight, 'B D M, M H V -> B H D V')
+    v += params.v_proj.bias.reshape(1, v.shape[1], 1, k.shape[3])
 
     q = jax.lax.with_sharding_constraint(q, sharding_q)
     k = jax.lax.with_sharding_constraint(k, sharding_k)
@@ -380,5 +381,6 @@ def forward_phi_model(params: PhiModel, seq: Array, qk_mask: Array, *, rotary_va
 @partial(jax.jit, static_argnames=('model_config'))
 def forward_phi(params: Phi, seq: Array, qk_mask: Array, *, rotary_values: RotaryValues, kv_cache: KVCache | None=None, key: Array | None=None, model_config: ModelConfig) -> tuple[Array, KVCache | None]:
     outputs, kv_cache = forward_phi_model(params.model, seq, qk_mask, rotary_values=rotary_values, kv_cache=kv_cache, key=key, model_config=model_config)
-    logits = outputs @ params.lm_head
+    logits = outputs @ params.lm_head.weight
+    logits += params.lm_head.bias.reshape(1, logits.shape[1], 1, logits.shape[3])
     return logits, kv_cache
