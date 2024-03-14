@@ -369,7 +369,7 @@ def forward_phi_model(params: PhiModel, seq: Array, qk_mask: Array, *, rotary_va
     assert isinstance(seq, Array)
     assert isinstance(qk_mask, Array)
     assert qk_mask.dtype == jnp.bool_
-    assert model_config.d_k % 2 == 0
+    assert model_config.head_dim % 2 == 0
     assert key is None or model_config.dropout_rate is not None
 
     seq = forward_embedding(params.embedding, seq)
