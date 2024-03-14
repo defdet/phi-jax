@@ -249,8 +249,8 @@ def forward_attention(params: Attention, src_seq: Array, dst_seq: Array, qk_mask
     q_rot = forward_rotary_embedding(q_rot, rotary_values=rotary_values)
     k_rot = forward_rotary_embedding(k_rot, rotary_values=rotary_values)
 
-    q = jnp.concatenate((q_rot, q_pass), dim=-1)
-    k = jnp.concatenate((k_rot, k_pass), dim=-1)
+    q = jnp.concatenate((q_rot, q_pass), axis=-1)
+    k = jnp.concatenate((k_rot, k_pass), axis=-1)
 
     if n_devices == 32:
         q = q.astype(jnp.float32)
