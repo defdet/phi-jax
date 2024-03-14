@@ -4,6 +4,7 @@ import einops as op
 import jax
 from jax import Array
 import jax.numpy as jnp
+import jax.nn as nn
 from functools import partial
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
