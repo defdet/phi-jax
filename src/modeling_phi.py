@@ -281,7 +281,7 @@ def forward_attention(params: Attention, src_seq: Array, dst_seq: Array, qk_mask
 
         qkv = op.einsum(qk, v, 'B R H S D, B H D V -> B R H S V')
         qkv = qkv.astype(jnp.bfloat16)
-        out = op.einsum(qkv, params.out_proj.weight, 'B R H S V, R H V M -> B S M')
+        out = op.einsum(qkv, params.dense.weight, 'B R H S V, R H V M -> B S M')
     else:
 
         # q = q.reshape(q.shape[0], model_config.n_rep_kv * model_config.n_heads_kv, q.shape[3], model_config.d_k)
