@@ -52,7 +52,7 @@ def _generate_rest(params: Phi, seq: Array, attn_mask: Array, selected_token_ids
         outputs, kv_cache = forward_phi_model(params.model, seq_, qk_mask, rotary_values=rotary_values_, kv_cache=kv_cache, model_config=phi_config._replace(return_kv_cache=True))
 
         logits = outputs[:, -1] @ params.lm_head.weight.T
-        logits += params.lm_head.bias.reshape(1, 1, -1)
+        logits += params.lm_head.bias.reshape(1, -1)
         key, subkey = rand.split(key)
         selected_token_ids = logits_processor(logits, seq=seq, attn_mask=attn_mask, key=subkey)
 
