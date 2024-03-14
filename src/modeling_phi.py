@@ -336,7 +336,7 @@ def forward_decoder_block(params: DecoderBlock, seq: Array, qk_mask: Array, *, r
     
     seq_ = seq
 
-    seq = forward_layer_norm(params.input_norm, seq, model_config=model_config)
+    seq = forward_layer_norm(params.input_layernorm, seq, model_config=model_config)
     attn_seq, kv_cache = forward_attention(params.attention, seq, seq, qk_mask, rotary_values=rotary_values, kv_cache=kv_cache, model_config=model_config)
     attn_seq = forward_dropout(attn_seq, key=key0, model_config=model_config)
 
