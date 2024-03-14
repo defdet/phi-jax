@@ -266,37 +266,54 @@ def forward_attention(params: Attention, src_seq: Array, dst_seq: Array, qk_mask
         k = k_cache.at[:, :, -1:].set(k)
         v = v_cache.at[:, :, -1:].set(v)
 
-    # q = q.reshape(q.shape[0], model_config.n_rep_kv * model_config.n_heads_kv, q.shape[3], model_config.d_k)
-    q = q.reshape(q_shape[0], q_shape[1] * q_shape[2], q_shape[3], q_shape[4]) # [B, H, S, K]
+    q = q.astype(jnp.float32)
+    k = k.astype(jnp.float32)
+    v = v.astype(jnp.float32)
+
     q_shape = q.shape
+    if attn_impl == 'normal':
+        qk = op.einsum(q, k, 'B R H S K, B H D K -> B R H S D')
+        qk /= math.sqrt(model_config.d_k)
+        qk = jnp.where(qk_mask, qk, -jnp.inf)
+        qk = nn.softmax(qk)  # TODO: use `where`
+        qk = jnp.where(qk_mask, qk, 0)  # TODO: why this line?
 
-    k = repeat_kv_bnsh(k, model_config.n_rep_kv)
-    v = repeat_kv_bnsh(v, model_config.n_rep_kv)
+        qkv = op.einsum(qk, v, 'B R H S D, B H D V -> B R H S V')
+        qkv = qkv.astype(jnp.bfloat16)
+        out = op.einsum(qkv, params.out_proj.weight, 'B R H S V, R H V M -> B S M')
+    else:
 
-    qk_mask = qk_mask.squeeze(1)
-    qk_mask = jnp.broadcast_to(qk_mask, (qk_mask.shape[0], q_shape[1], q_shape[2], q_shape[2]))
-
-
-    attention_bias = jax.lax.select(
-            qk_mask == True,
-            jnp.full(qk_mask.shape, 0.0).astype(jnp.bfloat16),
-            jnp.full(qk_mask.shape, -10.0**6).astype(jnp.bfloat16),
-        )
-    specs_tuple = (P(*name_tuple_k),
-                   P(*name_tuple_k),
-                   P(*name_tuple_k),
-                   P(*name_tuple_k))
+        # q = q.reshape(q.shape[0], model_config.n_rep_kv * model_config.n_heads_kv, q.shape[3], model_config.d_k)
+        q = q.reshape(q_shape[0], q_shape[1] * q_shape[2], q_shape[3], q_shape[4]) # [B, H, S, K]
+        q_shape = q.shape
     
-    if attn_impl == 'flash':
-        qkv = shard_map(partial(flash_attention, sm_scale=math.sqrt(model_config.head_dim), debug=False, causal=False), mesh=mesh_k, in_specs=specs_tuple, out_specs=P(*name_tuple_k), check_rep=False)(q, k, v, attention_bias)
-    elif attn_impl == 'ring':
-        segment_ids = jnp.zeros((q_shape[0], q_shape[2]), dtype="i4")
-        qkv = shard_map(partial(ring_attention, sm_scale=math.sqrt(model_config.head_dim), debug=False, causal=True), mesh=mesh_k, in_specs=specs_tuple, out_specs=P(*name_tuple_k), check_rep=False)(q, k, v, attention_bias, segment_ids)
-    qkv = qkv.astype(jnp.bfloat16)
+        qk_mask = qk_mask.squeeze(1)
+        qk_mask = jnp.broadcast_to(qk_mask, (qk_mask.shape[0], q_shape[1], q_shape[2], k.shape[2]))
+    
+    
+        attention_bias = jax.lax.select(
+                qk_mask == True,
+                jnp.full(qk_mask.shape, 0.0).astype(jnp.bfloat16),
+                jnp.full(qk_mask.shape, -10.0**6).astype(jnp.bfloat16),
+            )
+        specs_tuple = (P(*name_tuple_k),
+                       P(*name_tuple_k),
+                       P(*name_tuple_k),
+                       P(*name_tuple_k))
+        
+        if attn_impl == 'flash':
+            qkv = shard_map(partial(flash_attention, sm_scale=math.sqrt(model_config.d_k), debug=False, causal=False, block_sizes=block_sizes), mesh=mesh_k, in_specs=specs_tuple, out_specs=P(*name_tuple_k), check_rep=False)(q, k, v, attention_bias)
+        if attn_impl == 'ring':
+            qkv = shard_map(partial(ring_attention, sm_scale=math.sqrt(model_config.d_k), debug=False, causal=True), mesh=mesh_k, in_specs=specs_tuple, out_specs=P(*name_tuple_k), check_rep=False)(q, k, v, attention_bias)
+            
+        qkv = qkv.astype(jnp.bfloat16)
+    
+        qkv = qkv.reshape(qkv.shape[0], model_config.n_rep_kv, qkv.shape[1] // model_config.n_rep_kv, qkv.shape[2], -1)
+        out = op.einsum(qkv, params.dense.weight, 'B R H S V, R H V M -> B S M')
+        out += params.dense.bias.reshape(1, 1, out.shape[1])
 
-    qkv = qkv.reshape(qkv.shape[0], model_config.n_rep_kv, qkv.shape[1] // model_config.n_rep_kv, qkv.shape[2], -1)
-    out = op.einsum(qkv, params.dense, 'B R H S V, R H V M -> B S M')
     out = jax.lax.with_sharding_constraint(out, sharding_out)
+    out += params.dense.bias.reshape(1, 1, out.shape[1])
     
     kv_cache = None if not model_config.return_kv_cache else KVCache(k, v)
 
