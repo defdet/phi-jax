@@ -12,10 +12,10 @@ from jax.experimental.shard_map import shard_map
 from jax.experimental.pallas.ops.tpu import flash_attention
 import os
 import math
-from .ring_attention import ring_attention
 from typing import Any
 import jax.random as rand
 from itertools import repeat
+from tqdm import tqdm
 
 
 class Proj(NamedTuple):
@@ -76,9 +76,148 @@ phi_config = ModelConfig(
     return_kv_cache=False,
 )
 
+from jax import Array
+import torch
+import torch.nn as tnn
+from transformers import PhiForCausalLM, PhiModel as PhiModelPt
+from transformers.models.phi.modeling_phi import PhiAttention, PhiDecoderLayer
+
+import torch
+from jax import Array
+import jax.numpy as jnp
+import numpy as np
+
+def jax2np(x: Array) -> np.ndarray:
+    '''
+    Converts a JAX array into a NumPy array.
+
+    Args:
+        x (Array): JAX array to convert.
+
+    Returns:
+        np.ndarray: Converted NumPy array.
+    '''
+    return np.asarray(x)
+
+def np2jax(x: np.ndarray) -> Array:
+    '''
+    Converts a NumPy array into a JAX array.
+
+    Args:
+        x (np.ndarray): NumPy array to convert.
+
+    Returns:
+        Array: Converted JAX array.
+    '''
+    return jnp.asarray(x)
+
+def pt2np(x: torch.Tensor) -> np.ndarray:
+    '''
+    Converts a PyTorch tensor into a NumPy array.
+
+    Args:
+        x (torch.Tensor): PyTorch tensor to convert.
+
+    Returns:
+        np.ndarray: Converted NumPy array.
+    '''
+    with torch.no_grad():
+        return x.numpy()
+
+def np2pt(x: np.ndarray) -> torch.Tensor:
+    '''
+    Converts a NumPy array into a PyTorch tensor.
+
+    Args:
+        x (np.ndarray): NumPy array to convert.
+
+    Returns:
+        torch.Tensor: Converted PyTorch tensor.
+    '''
+    return torch.from_numpy(x)
+
+def jax2pt(x: Array) -> torch.Tensor:
+    '''
+    Converts a JAX array into a PyTorch tensor using NumPy as intermediate.
+
+    Args:
+        x (Array): JAX array to convert.
+
+    Returns:
+        torch.Tensor: Converted PyTorch tensor.
+    '''
+    return np2pt(jax2np(x))
+
+def pt2jax(x: torch.Tensor) -> Array:
+    '''
+    Converts a PyTorch tensor into a JAX array using NumPy as intermediate.
+
+    Args:
+        x (torch.Tensor): PyTorch tensor to convert.
+
+    Returns:
+        Array: Converted JAX array.
+    '''
+    return np2jax(pt2np(x))
+
+def stack_leaves(pytrees, axis: int=0):
+    return jax.tree_map(lambda *xs: jnp.stack(xs, axis=axis), *pytrees)
+
+
+def convert_q_proj(x: tnn.Linear, *, model_config: ModelConfig) -> Array:
+    weight = pt2jax(x.weight.T.reshape(model_config.d_model, model_config.n_heads_kv,  model_config.n_rep_kv, model_config.head_dim)).transpose(0, 2, 1, 3)
+    bias = pt2jax(x.bias)
+    return Proj(weight=weight, bias=bias)
+
+def convert_k_proj(x: tnn.Linear, *, model_config: ModelConfig) -> Array:
+    weight = pt2jax(x.weight.T.reshape(model_config.d_model, model_config.n_heads_kv, model_config.head_dim))
+    bias = pt2jax(x.bias)
+    return Proj(weight=weight, bias=bias)
+
+def convert_v_proj(x: tnn.Linear, *, model_config: ModelConfig) -> Array:
+    weight = pt2jax(x.weight.T.reshape(model_config.d_model, model_config.n_heads_kv, model_config.head_dim))
+    bias = pt2jax(x.bias)
+    return Proj(weight=weight, bias=bias)
+
+def convert_out_proj(x: tnn.Linear, *, model_config: ModelConfig) -> Array:
+    weight = pt2jax(x.weight.T.reshape(model_config.n_heads_kv, model_config.n_rep_kv, model_config.head_dim, model_config.d_model)).transpose(1, 0, 2, 3)
+    bias = pt2jax(x.bias)
+    return Proj(weight=weight, bias=bias)
+
+def convert_attention(x: PhiAttention, *, model_config: ModelConfig) -> Attention:
+    q_proj = convert_q_proj(x.q_proj, model_config=model_config)
+    k_proj = convert_k_proj(x.k_proj, model_config=model_config)
+    v_proj = convert_v_proj(x.v_proj, model_config=model_config)
+    dense = convert_out_proj(x.dense, model_config=model_config)
+    return Attention(q_proj=q_proj, k_proj=k_proj, v_proj=v_proj, dense=dense)
+
+def convert_layernorm(x: Any) -> Attention:
+    return LayerNorm(weight=pt2jax(x.weight), bias=pt2jax(x.bias))
+
+def convert_decoder_block(x: PhiDecoderLayer, *, model_config: ModelConfig) -> DecoderBlock:
+    input_norm = pt2jax(x.input_layernorm.weight)
+    attention = convert_attention(x.self_attn, model_config=model_config)
+    input_layernorm = convert_layernorm(x.input_layernorm)
+    fc1 = Proj(weight=pt2jax(x.mlp.fc1.weight.T), bias=pt2jax(x.mlp.fc1.bias))
+    fc2 = Proj(weight=pt2jax(x.mlp.fc2.weight.T), bias=pt2jax(x.mlp.fc2.bias))
+    return DecoderBlock(input_layernorm=input_layernorm, attention=attention, fc1=fc1, fc2=fc2)
+
+def convert_phi_model(model: PhiModelPt, *, model_config: ModelConfig) -> PhiModel:
+    embedding = pt2jax(model.embed_tokens.weight)
+    decoder = stack_leaves([convert_decoder_block(model.layers[i], model_config=model_config) for i in tqdm(range(model_config.n_layers))])
+    final_layernorm = convert_layernorm(model.final_layernorm)
+    return PhiModel(embedding=embedding, decoder=decoder, final_layernorm=final_layernorm)
+
+def convert_phi(model_pt: PhiForCausalLM, *, model_config: ModelConfig) -> Phi:
+    with torch.no_grad():
+        model = convert_phi_model(model_pt.model, model_config=model_config)
+        lm_head = Proj(weight=pt2jax(model_pt.lm_head.weght.T), bias=pt2jax(model_pt.lm_head.bias))
+        return Phi(model=model, lm_head=lm_head)
+
+
 class KVCache(NamedTuple):
-    k_cache: Array  # Array
-    v_cache: Array  # Array
+    k_cache: Array
+    v_cache: Array
 
 class RotaryValues(NamedTuple):
     sin_val: Array
@@ -173,54 +312,6 @@ def repeat_kv_bnsh(x: Array, n_rep: int) -> Array:
 
 @partial(jax.jit, static_argnames=('model_config',))
 def forward_attention(params: Attention, src_seq: Array, dst_seq: Array, qk_mask: Array, *, rotary_values: RotaryValues, kv_cache: KVCache | None=None, model_config: ModelConfig) -> tuple[Array, KVCache | None]:
-    size_num = 128
-    attn_impl = os.getenv('ATTN_IMPL')
-    n_devices = jax.device_count()
-    devices = mesh_utils.create_device_mesh((n_devices, ))
-    if n_devices == 32:
-        device_tuple = (4, 8)
-    else:
-        device_tuple = (2, n_devices // 2)
-
-    q_axes = (0, 2)
-    k_axes = (0, 1)
-    v_axes = (0, 1)
-    out_axes = (0, 2)
-
-    sharding_tuple_q = [1] * 5
-    sharding_tuple_k = [1] * 4
-    sharding_tuple_v = [1] * 4
-    sharding_tuple_out = [1] * 3
-
-    for axis_num, axis in enumerate(q_axes):
-        sharding_tuple_q[axis]=device_tuple[axis_num]
-    for axis_num, axis in enumerate(k_axes):
-        sharding_tuple_k[axis]=device_tuple[axis_num]
-    for axis_num, axis in enumerate(v_axes):
-        sharding_tuple_v[axis]=device_tuple[axis_num]
-    for axis_num, axis in enumerate(out_axes):
-        sharding_tuple_out[axis]=device_tuple[axis_num]
-
-    sharding_tuple_q = tuple(sharding_tuple_q)
-    sharding_tuple_k = tuple(sharding_tuple_k)
-    sharding_tuple_v = tuple(sharding_tuple_v)
-    sharding_tuple_out = tuple(sharding_tuple_out)
-    
-    name_tuple_q = tuple('abcdefghijklmnopqrstuvwxyz'[:5])
-    mesh_q = Mesh(devices.reshape(sharding_tuple_q), name_tuple_q)     
-    sharding_q = NamedSharding(mesh_q, P(*name_tuple_q))
-
-    name_tuple_k = tuple('abcdefghijklmnopqrstuvwxyz'[:4])
-    mesh_k = Mesh(devices.reshape(sharding_tuple_k), name_tuple_k)     
-    sharding_k = NamedSharding(mesh_k, P(*name_tuple_k))
-
-    name_tuple_v = tuple('abcdefghijklmnopqrstuvwxyz'[:4])
-    mesh_v = Mesh(devices.reshape(sharding_tuple_v), name_tuple_v)     
-    sharding_v = NamedSharding(mesh_v, P(*name_tuple_v))
-
-    name_tuple_out = tuple('abcdefghijklmnopqrstuvwxyz'[:3])
-    mesh_out = Mesh(devices.reshape(sharding_tuple_out), name_tuple_out)     
-    sharding_out = NamedSharding(mesh_out, P(*name_tuple_out))
 
     q = op.einsum(src_seq, params.q_proj.weight, 'B S M, M R H K -> B R H S K')
     q += params.q_proj.bias.reshape(1, 1, q.shape[2], 1, q.shape[4])
@@ -230,10 +321,6 @@ def forward_attention(params: Attention, src_seq: Array, dst_seq: Array, qk_mask
     
     v = op.einsum(dst_seq, params.v_proj.weight, 'B D M, M H V -> B H D V')
     v += params.v_proj.bias.reshape(1, v.shape[1], 1, k.shape[3])
-
-    q = jax.lax.with_sharding_constraint(q, sharding_q)
-    k = jax.lax.with_sharding_constraint(k, sharding_k)
-    v = jax.lax.with_sharding_constraint(v, sharding_v)
 
     rotary_dim = int(model_config.partial_rotary_factor * model_config.head_dim)
 
@@ -253,10 +340,6 @@ def forward_attention(params: Attention, src_seq: Array, dst_seq: Array, qk_mask
     q = jnp.concatenate((q_rot, q_pass), axis=-1)
     k = jnp.concatenate((k_rot, k_pass), axis=-1)
 
-    if n_devices == 32:
-        q = q.astype(jnp.float32)
-        k = k.astype(jnp.float32)
-        v = v.astype(jnp.float32)
 
     q_shape = q.shape
 
@@ -267,106 +350,48 @@ def forward_attention(params: Attention, src_seq: Array, dst_seq: Array, qk_mask
         k = k_cache.at[:, :, -1:].set(k)
         v = v_cache.at[:, :, -1:].set(v)
 
-    q = q.astype(jnp.float32)
-    k = k.astype(jnp.float32)
-    v = v.astype(jnp.float32)
 
-    q_shape = q.shape
-    if attn_impl == 'normal':
-        qk = op.einsum(q, k, 'B R H S K, B H D K -> B R H S D')
-        qk /= math.sqrt(model_config.head_dim)
-        qk = jnp.where(qk_mask, qk, -jnp.inf)
-        qk = nn.softmax(qk)  # TODO: use `where`
-        qk = jnp.where(qk_mask, qk, 0)  # TODO: why this line?
 
-        qkv = op.einsum(qk, v, 'B R H S D, B H D V -> B R H S V')
-        qkv = qkv.astype(jnp.bfloat16)
-        out = op.einsum(qkv, params.dense.weight, 'B R H S V, R H V M -> B S M')
-    else:
+    qk = op.einsum(q, k, 'B R H S K, B H D K -> B R H S D')
+    qk /= math.sqrt(model_config.head_dim)
+    qk = jnp.where(qk_mask, qk, -jnp.inf)
+    qk = nn.softmax(qk)  # TODO: use `where`
+    qk = jnp.where(qk_mask, qk, 0)  # TODO: why this line?
 
-        # q = q.reshape(q.shape[0], model_config.n_rep_kv * model_config.n_heads_kv, q.shape[3], model_config.d_k)
-        q = q.reshape(q_shape[0], q_shape[1] * q_shape[2], q_shape[3], q_shape[4]) # [B, H, S, K]
-        q_shape = q.shape
-    
-        qk_mask = qk_mask.squeeze(1)
-        qk_mask = jnp.broadcast_to(qk_mask, (qk_mask.shape[0], q_shape[1], q_shape[2], k.shape[2]))
-    
-    
-        attention_bias = jax.lax.select(
-                qk_mask == True,
-                jnp.full(qk_mask.shape, 0.0).astype(jnp.bfloat16),
-                jnp.full(qk_mask.shape, -10.0**6).astype(jnp.bfloat16),
-            )
-        specs_tuple = (P(*name_tuple_k),
-                       P(*name_tuple_k),
-                       P(*name_tuple_k),
-                       P(*name_tuple_k))
-        
-        if attn_impl == 'flash':
-            qkv = shard_map(partial(flash_attention, sm_scale=math.sqrt(model_config.head_dim), debug=False, causal=False, block_sizes=block_sizes), mesh=mesh_k, in_specs=specs_tuple, out_specs=P(*name_tuple_k), check_rep=False)(q, k, v, attention_bias)
-        if attn_impl == 'ring':
-            qkv = shard_map(partial(ring_attention, sm_scale=math.sqrt(model_config.head_dim), debug=False, causal=True), mesh=mesh_k, in_specs=specs_tuple, out_specs=P(*name_tuple_k), check_rep=False)(q, k, v, attention_bias)
-            
-        qkv = qkv.astype(jnp.bfloat16)
-    
-        qkv = qkv.reshape(qkv.shape[0], model_config.n_rep_kv, qkv.shape[1] // model_config.n_rep_kv, qkv.shape[2], -1)
-        out = op.einsum(qkv, params.dense.weight, 'B R H S V, R H V M -> B S M')
+    qkv = op.einsum(qk, v, 'B R H S D, B H D V -> B R H S V')
+    out = op.einsum(qkv, params.dense.weight, 'B R H S V, R H V M -> B S M')
 
-    out = jax.lax.with_sharding_constraint(out, sharding_out)
     out += params.dense.bias.reshape(1, 1, out.shape[2])
     
     kv_cache = None if not model_config.return_kv_cache else KVCache(k, v)
 
     return out, kv_cache
 
+@partial(jax.jit)
+def forward_mlp(params: DecoderBlock, seq: Array) -> Array:
+
+    seq = seq @ params.fc1.weight + params.fc1.bias
+    print(seq.shape)
+    seq = jax.nn.gelu(seq, approximate=False)
+    seq = seq @ params.fc2.weight + params.fc2.bias
+
+    return seq
+
 @partial(jax.jit, static_argnames=('model_config',))
 def forward_decoder_block(params: DecoderBlock, seq: Array, qk_mask: Array, *, rotary_values: RotaryValues, kv_cache: KVCache | None=None, key: Array | None=None, model_config: ModelConfig) -> tuple[Array, KVCache | None]:
     key0, key1, key2 = split_key_nullable(key, num=3)
-    n_devices = jax.device_count()
-    devices = mesh_utils.create_device_mesh((n_devices, ))
-    if n_devices == 32:
-        device_tuple = (4, 8)
-    else:
-        device_tuple = (2, n_devices // 2)
-
-    ff_axes = (0, 2)
-    seq_axes = (0, 2)
-
-    sharding_tuple_ff = [1] * 3
-    sharding_tuple_seq = [1] * 3
-
-    for axis_num, axis in enumerate(ff_axes):
-        sharding_tuple_ff[axis]=device_tuple[axis_num]
-    for axis_num, axis in enumerate(seq_axes):
-        sharding_tuple_seq[axis]=device_tuple[axis_num]
-
-    sharding_tuple_ff = tuple(sharding_tuple_ff)
-    sharding_tuple_seq = tuple(sharding_tuple_seq)
-
-    name_tuple_ff = tuple('abcdefghijklmnopqrstuvwxyz'[:3])
-    mesh_ff = Mesh(devices.reshape(sharding_tuple_ff), name_tuple_ff)     
-    sharding_ff = NamedSharding(mesh_ff, P(*name_tuple_ff))
-
-    name_tuple_seq = tuple('abcdefghijklmnopqrstuvwxyz'[:3])
-    mesh_seq = Mesh(devices.reshape(sharding_tuple_seq), name_tuple_seq)     
-    sharding_seq = NamedSharding(mesh_seq, P(*name_tuple_seq))
     
     seq_ = seq
 
     seq = forward_layer_norm(params.input_layernorm, seq, model_config=model_config)
     attn_seq, kv_cache = forward_attention(params.attention, seq, seq, qk_mask, rotary_values=rotary_values, kv_cache=kv_cache, model_config=model_config)
     attn_seq = forward_dropout(attn_seq, key=key0, model_config=model_config)
-
-
-    seq = seq @ params.fc1.weight.T + params.fc1.bias.reshape(1, 1, -1)
-    seq = jax.lax.with_sharding_constraint(seq, sharding_ff)
-
-    seq = jax.nn.silu(seq)
-    seq = seq @ params.fc2.weight.T + params.fc2.bias.reshape(1, 1, -1)
-    seq = jax.lax.with_sharding_constraint(seq, sharding_seq)
-    seq = forward_dropout(seq, key=key0, model_config=model_config)
     
-    seq += seq_ + attn_seq
+    mlp_seq = forward_mlp(params, seq)
+    mlp_seq = forward_dropout(mlp_seq, key=key0, model_config=model_config)
+    
+    
+    seq = mlp_seq + seq_ + attn_seq
     return seq, kv_cache
 
 @partial(jax.jit, static_argnames=('model_config',))
